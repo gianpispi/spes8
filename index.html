@@ -344,7 +344,7 @@ input::placeholder{color:var(--hi)}
   </div>
 
   <!-- Bottone principale: apre fotocamera iOS -->
-  <input type="file" id="scan-file-input" accept="image/*" capture="environment" style="display:none" onchange="handleScanPhoto(this)">
+  <input type="file" id="scan-file-input" accept="image/*,.heic,.heif" capture="environment" style="display:none" onchange="handleScanPhoto(this)">
 
   <button class="btn btn-primary btn-full" style="margin-bottom:10px;font-size:15px;background:#1A1714;color:#fff" onclick="document.getElementById('scan-file-input').click()">
     📷 Scatta foto al codice a barre
@@ -966,7 +966,7 @@ function _openScanModal(title){
   openModal('m-scanner');
 }
 
-function handleScanPhoto(input){
+async function handleScanPhoto(input){
   const file=input.files&&input.files[0];
   if(!file)return;
   const statusEl=document.getElementById('scan-status');
@@ -976,15 +976,68 @@ function handleScanPhoto(input){
   document.getElementById('scan-preview-img').src=url;
   document.getElementById('scan-preview-wrap').style.display='block';
 
-  loadHtml5QR(()=>{
-    // Tentativo 1: file originale
-    Html5Qrcode.scanFile(file, true)
-      .then(bc=>onBarcodeFound(bc, url, statusEl))
-      .catch(()=>{
-        statusEl.textContent='Primo tentativo fallito, provo a elaborare l\'immagine…';
-        // Tentativo 2: immagine pre-processata (contrasto aumentato, crop centrale)
-        preprocessAndRetry(file, url, statusEl);
-      });
+  try{
+    statusEl.textContent='Analizzo la foto…';
+
+    // 1) Prima prova il detector nativo del browser: su mobile è spesso più affidabile.
+    const nativeBarcode=await tryNativeBarcodeDetector(file, url);
+    if(nativeBarcode){
+      onBarcodeFound(nativeBarcode, url, statusEl);
+      return;
+    }
+
+    // 2) Fallback html5-qrcode.
+    loadHtml5QR(()=>{
+      Html5Qrcode.scanFile(file, true)
+        .then(bc=>onBarcodeFound(bc, url, statusEl))
+        .catch(()=>{
+          statusEl.textContent='Primo tentativo fallito, provo a elaborare l\'immagine…';
+          preprocessAndRetry(file, url, statusEl);
+        });
+    });
+  }catch(e){
+    statusEl.textContent='Non riesco a leggere questa foto automaticamente.';
+    document.getElementById('scan-manual-hint').style.display='block';
+  }
+}
+
+async function tryNativeBarcodeDetector(file, url){
+  if(!('BarcodeDetector' in window)) return null;
+
+  try{
+    const formats=await BarcodeDetector.getSupportedFormats?.()||[];
+    const wanted=['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf'];
+    const usable=formats.filter(f=>wanted.includes(f));
+    const detector=new BarcodeDetector(usable.length?{formats:usable}:undefined);
+
+    const bitmap=await createImageBitmap(file);
+    try{
+      const results=await detector.detect(bitmap);
+      const value=(results||[]).find(r=>r?.rawValue)?.rawValue;
+      if(value) return value;
+    } finally {
+      bitmap.close?.();
+    }
+  }catch(_e){
+    // Alcuni browser mobili falliscono con createImageBitmap/HEIC: riprova via <img>.
+  }
+
+  try{
+    const img=await loadImageFromUrl(url);
+    const detector=new BarcodeDetector();
+    const results=await detector.detect(img);
+    return (results||[]).find(r=>r?.rawValue)?.rawValue||null;
+  }catch(_e){
+    return null;
+  }
+}
+
+function loadImageFromUrl(url){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>resolve(img);
+    img.onerror=reject;
+    img.src=url;
   });
 }
 
@@ -1023,6 +1076,11 @@ function preprocessAndRetry(file, url, statusEl){
       ctx.drawImage(img, c.sx, c.sy, c.sw, c.sh, 0, 0, canvas.width, canvas.height);
 
       canvas.toBlob(blob=>{
+        if(!blob){
+          statusEl.textContent='Impossibile elaborare la foto.';
+          document.getElementById('scan-manual-hint').style.display='block';
+          return;
+        }
         Html5Qrcode.scanFile(new File([blob],`scan_${attempt}.jpg`,{type:'image/jpeg'}), true)
           .then(bc=>onBarcodeFound(bc, url, statusEl))
           .catch(()=>{
@@ -1143,11 +1201,12 @@ function renderOFFCard(p){
 }
 
 function linkOrEdit(){
+  const target=scanTarget;
   // Chiudi scanner e apri modal dispensa
   closeScanner();
-  if(scanTarget&&scanTarget!=='new'){
+  if(target&&target!=='new'){
     // Collegamento a item esistente
-    openEditPantry(scanTarget);
+    openEditPantry(target);
     // Precompila con dati OFF
     if(pendingOFF){
       if(pendingOFF.name)document.getElementById('pa-name').value=pendingOFF.name;
