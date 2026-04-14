@@ -960,6 +960,7 @@ function _openScanModal(title){
   document.getElementById('scan-result').innerHTML='';
   document.getElementById('scan-status').textContent='';
   document.getElementById('manual-bc').value='';
+  document.getElementById('quick-bc').value='';
   document.getElementById('scan-preview-wrap').style.display='none';
   document.getElementById('scan-manual-hint').style.display='none';
   document.getElementById('scan-file-input').value='';
@@ -971,6 +972,7 @@ async function handleScanPhoto(input){
   if(!file)return;
   const statusEl=document.getElementById('scan-status');
   statusEl.textContent='Elaboro la foto…';
+  setScannedBarcode('');
 
   const url=URL.createObjectURL(file);
   document.getElementById('scan-preview-img').src=url;
@@ -979,15 +981,18 @@ async function handleScanPhoto(input){
   try{
     statusEl.textContent='Analizzo la foto…';
 
-    // 1) Prima prova il detector nativo del browser: su mobile è spesso più affidabile.
-    const nativeBarcode=await tryNativeBarcodeDetector(file, url);
+    // 1) Prima prova il detector nativo del browser, ma con timeout per evitare blocchi su mobile.
+    const nativeBarcode=await withTimeout(tryNativeBarcodeDetector(file, url), 2500);
     if(nativeBarcode){
       onBarcodeFound(nativeBarcode, url, statusEl);
       return;
     }
 
+    statusEl.textContent='Nessun codice trovato al primo tentativo. Provo un altro metodo…';
+
     // 2) Fallback html5-qrcode.
     loadHtml5QR(()=>{
+      statusEl.textContent='Analizzo con metodo alternativo…';
       Html5Qrcode.scanFile(file, true)
         .then(bc=>onBarcodeFound(bc, url, statusEl))
         .catch(()=>{
@@ -999,6 +1004,30 @@ async function handleScanPhoto(input){
     statusEl.textContent='Non riesco a leggere questa foto automaticamente.';
     document.getElementById('scan-manual-hint').style.display='block';
   }
+}
+
+function withTimeout(promise, ms){
+  return new Promise(resolve=>{
+    let done=false;
+    const timer=setTimeout(()=>{
+      if(done)return;
+      done=true;
+      resolve(null);
+    }, ms);
+    Promise.resolve(promise)
+      .then(v=>{
+        if(done)return;
+        done=true;
+        clearTimeout(timer);
+        resolve(v||null);
+      })
+      .catch(()=>{
+        if(done)return;
+        done=true;
+        clearTimeout(timer);
+        resolve(null);
+      });
+  });
 }
 
 async function tryNativeBarcodeDetector(file, url){
@@ -1098,7 +1127,17 @@ function preprocessAndRetry(file, url, statusEl){
   img.src=url;
 }
 
+function setScannedBarcode(bc){
+  const value=String(bc||'').trim();
+  const manual=document.getElementById('manual-bc');
+  const quick=document.getElementById('quick-bc');
+  if(manual) manual.value=value;
+  if(quick) quick.value=value;
+}
+
 function onBarcodeFound(bc, url, statusEl){
+  bc=String(bc||'').trim();
+  setScannedBarcode(bc);
   statusEl.textContent=`✓ Codice trovato: ${bc}`;
   document.getElementById('scan-manual-hint').style.display='none';
   if(url) URL.revokeObjectURL(url);
